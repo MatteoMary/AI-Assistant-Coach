@@ -7,6 +7,9 @@ from datetime import datetime, timedelta
 from PIL import Image
 import base64
 from io import BytesIO
+import streamlit.components.v1 as components
+import time
+import os
 
 # Configure the page
 st.set_page_config(
@@ -18,113 +21,248 @@ st.set_page_config(
 # API Configuration
 API_URL = "http://localhost:8000/api/v1"
 
+def load_css():
+    """Load external CSS file"""
+    with open('app/frontend/style.css') as f:
+        st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
+
+def get_headers():
+    """Get headers for authenticated requests"""
+    token = st.session_state.get('token')
+    if token:
+        return {"Authorization": f"Bearer {token}"}
+    return {}
+
+def init_session_state():
+    """Initialize session state variables."""
+    if "token" not in st.session_state:
+        st.session_state.token = None
+    if "user" not in st.session_state:
+        st.session_state.user = None
+    if "user_data" not in st.session_state:
+        st.session_state.user_data = {}
+    if "training_plan" not in st.session_state:
+        st.session_state.training_plan = None
+    if "profile_data" not in st.session_state:
+        st.session_state.profile_data = {}
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+def check_session_cookie():
+    """Check for existing session cookie and restore session if valid."""
+    try:
+        # Make a request to check if we have a valid session
+        response = requests.get(
+            f"{API_URL}/auth/session",
+            timeout=5
+        )
+        if response.status_code == 200:
+            session_data = response.json()
+            if session_data.get("token"):
+                # Test if the token is still valid
+                test_response = requests.get(
+                    f"{API_URL}/auth/me",
+                    headers={"Authorization": f"Bearer {session_data['token']}"},
+                    timeout=5
+                )
+                if test_response.status_code == 200:
+                    st.session_state.token = session_data["token"]
+                    st.session_state.user = test_response.json()
+                    return True
+    except Exception as e:
+        st.debug(f"Session check error: {str(e)}")
+    return False
+
+def login():
+    """Login form and authentication."""
+    st.title("🏃 AI Running Coach - Login")
+    
+    # Create tabs for login and registration
+    tab1, tab2 = st.tabs(["Login", "Register"])
+    
+    with tab1:
+        with st.form("login_form"):
+            email = st.text_input("Email", key="login_email")
+            password = st.text_input("Password", type="password", key="login_password")
+            
+            # Add test credentials button
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                submitted = st.form_submit_button("Login")
+            with col2:
+                if st.form_submit_button("🧪 Test"):
+                    st.session_state.login_email = "test@example.com"
+                    st.session_state.login_password = "test123"
+                    st.rerun()
+            
+            if submitted:
+                try:
+                    # Use a session to maintain cookies
+                    with requests.Session() as session:
+                        response = session.post(
+                            f"{API_URL}/auth/token",
+                            data={"username": email, "password": password}
+                        )
+                        if response.status_code == 200:
+                            token_data = response.json()
+                            st.session_state.token = token_data["access_token"]
+                            
+                            # Get user data
+                            user_response = session.get(
+                                f"{API_URL}/auth/me",
+                                headers={"Authorization": f"Bearer {token_data['access_token']}"}
+                            )
+                            if user_response.status_code == 200:
+                                st.session_state.user = user_response.json()
+                                st.success("Login successful!")
+                                st.rerun()
+                        else:
+                            st.error("Invalid credentials")
+                except Exception as e:
+                    st.error(f"Error during login: {str(e)}")
+    
+    with tab2:
+        with st.form("register_form"):
+            reg_email = st.text_input("Email", key="register_email")
+            reg_password = st.text_input("Password", type="password", key="register_password")
+            reg_name = st.text_input("Name", key="register_name")
+            
+            submitted = st.form_submit_button("Register")
+            
+            if submitted:
+                try:
+                    response = requests.post(
+                        f"{API_URL}/auth/register",
+                        json={
+                            "email": reg_email,
+                            "password": reg_password,
+                            "name": reg_name
+                        }
+                    )
+                    if response.status_code == 200:
+                        st.success("Registration successful! Please log in.")
+                        st.rerun()
+                    else:
+                        error_detail = response.json().get("detail", "Registration failed")
+                        st.error(f"Registration failed: {error_detail}")
+                except Exception as e:
+                    st.error(f"Error during registration: {str(e)}")
+
+def logout():
+    """Logout and clear session state."""
+    try:
+        # Clear server-side session
+        requests.post(f"{API_URL}/auth/logout")
+    except:
+        pass
+    
+    # Clear local session state
+    st.session_state.token = None
+    st.session_state.user = None
+    st.session_state.user_data = {}
+    st.session_state.training_plan = None
+    st.session_state.profile_data = {}
+    st.session_state.chat_history = []
+    
+    st.rerun()
+
 def main():
+    """Main application entry point."""
+    # Load CSS
+    load_css()
+    
+    init_session_state()
+    
+    # Check for URL parameters for success messages
+    params = st.query_params
+    
+    if "strava_success" in params:
+        st.success("🎉 Successfully connected to Strava! Your account is now linked.")
+        # Clear the parameter
+        st.query_params.clear()
+    
+    if "strava_error" in params:
+        error_msg = params["strava_error"]
+        st.error(f"❌ Failed to connect to Strava: {error_msg}")
+        # Clear the parameter
+        st.query_params.clear()
+    
+    # FOR TESTING: Set default user data
+    if "user" not in st.session_state:
+        st.session_state.user = {
+            "name": "Test User",
+            "email": "test@example.com"
+        }
+    
+    # Main application interface
     st.title("🏃 AI Running Coach")
     
-    # Initialize session state for data persistence
-    if 'user_data' not in st.session_state:
-        st.session_state.user_data = {}
-    if 'training_plan' not in st.session_state:
-        st.session_state.training_plan = None
-    if 'profile_data' not in st.session_state:
-        st.session_state.profile_data = {}
-    if 'access_token' not in st.session_state:
-        st.session_state.access_token = None
-
-    # Login section
-    if not st.session_state.get("access_token"):
-        st.subheader("Login")
-        email = st.text_input("Email", key="login_email")
-        password = st.text_input("Password", type="password", key="login_password")
-        
-        if st.button("Login"):
-            try:
-                print(f"Debug: Attempting login with email: {email}, password: {password}")
-                response = requests.post(
-                    f"{API_URL}/users/token",
-                    data={"username": email, "password": password},
-                    headers={"Content-Type": "application/x-www-form-urlencoded"}
-                )
-                print(f"Debug: Response status code: {response.status_code}, headers: {response.headers}, text: {response.text}")
-                
-                if response.status_code == 200:
-                    token_data = response.json()
-                    st.session_state["access_token"] = token_data["access_token"]
-                    st.session_state["token_type"] = token_data["token_type"]
-                    print(f"Debug: Token stored in session state: {st.session_state['access_token']}")
-                    st.success("Login successful!")
-                    st.rerun()
-                else:
-                    st.error("Login failed. Please check your credentials.")
-            except Exception as e:
-                st.error(f"Error during login: {str(e)}")
-                print(f"Debug: Login error: {str(e)}")
-        return
-
-    # Sidebar for navigation
-    with st.sidebar:
-        st.title("Navigation")
-        page = st.radio(
-            "Go to",
-            ["Dashboard", "Training Plan", "Daily Log", "Progress", "Profile", "Strava", "Workout Context", "Coach Chat"]
-        )
+    # User info in sidebar
+    user_name = st.session_state.user.get('name', 'User') if st.session_state.user else 'User'
+    user_email = st.session_state.user.get('email', 'N/A') if st.session_state.user else 'N/A'
     
-    # Check API connection with timeout
-    try:
-        response = requests.get("http://localhost:8000/", timeout=5)
-        if response.status_code == 200:
-            st.sidebar.success("Connected to backend")
-        else:
-            st.sidebar.error(f"Backend error: {response.status_code}")
-            st.error("Please make sure the backend server is running on port 8000")
-            return
-    except requests.exceptions.ConnectionError:
-        st.sidebar.error("Cannot connect to backend")
-        st.error("""
-        Cannot connect to the backend server. Please ensure:
-        1. The backend server is running (uvicorn app.main:app --host 0.0.0.0 --port 8000)
-        2. You're running both frontend and backend
-        3. The API_URL is correct (currently set to http://localhost:8000)
-        """)
-        return
-    except requests.exceptions.Timeout:
-        st.sidebar.error("Backend connection timeout")
-        st.error("The backend server is taking too long to respond. Please check if it's running correctly.")
-        return
-    except Exception as e:
-        st.sidebar.error(f"Unexpected error: {str(e)}")
-        return
-
-    # Load data based on current page
-    if page == "Profile":
-        load_profile_data()
-    elif page == "Training Plan":
-        load_training_plan()
+    st.sidebar.markdown(f"**Welcome, {user_name}!**")
+    st.sidebar.markdown(f"Email: {user_email}")
     
-    # Display selected page
-    if page == "Dashboard":
+    # COMMENTED OUT FOR TESTING - REMOVE COMMENTS TO RE-ENABLE LOGOUT
+    # if st.sidebar.button("🚪 Logout"):
+    #     logout()
+    #     return
+    
+    # Navigation buttons
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Navigation**")
+    
+    if st.sidebar.button("📊 Dashboard"):
+        st.session_state.current_page = "Dashboard"
+        st.rerun()
+    if st.sidebar.button("👤 Profile"):
+        st.session_state.current_page = "Profile"
+        st.rerun()
+    if st.sidebar.button("📋 Training Plan"):
+        st.session_state.current_page = "Training Plan"
+        st.rerun()
+    if st.sidebar.button("🤖 Chat with AI Coach"):
+        st.session_state.current_page = "Chat with AI Coach"
+        st.rerun()
+    if st.sidebar.button("💪 Workout Context"):
+        st.session_state.current_page = "Workout Context"
+        st.rerun()
+    if st.sidebar.button("🏃 Strava"):
+        st.session_state.current_page = "Strava"
+        st.rerun()
+    if st.sidebar.button("⚙️ Settings"):
+        st.session_state.current_page = "Settings"
+        st.rerun()
+    
+    # Initialize current page if not set
+    if "current_page" not in st.session_state:
+        st.session_state.current_page = "Dashboard"
+    
+    # Route to appropriate page
+    if st.session_state.current_page == "Dashboard":
         show_dashboard()
-    elif page == "Training Plan":
-        show_training_plan()
-    elif page == "Daily Log":
-        show_daily_log()
-    elif page == "Progress":
-        show_progress()
-    elif page == "Profile":
+    elif st.session_state.current_page == "Profile":
         show_profile()
-    elif page == "Strava":
-        show_strava()
-    elif page == "Workout Context":
-        show_workout_context()
-    elif page == "Coach Chat":
+    elif st.session_state.current_page == "Training Plan":
+        show_training_plan()
+    elif st.session_state.current_page == "Chat with AI Coach":
         show_chat()
+    elif st.session_state.current_page == "Workout Context":
+        show_workout_context()
+    elif st.session_state.current_page == "Strava":
+        show_strava()
+    elif st.session_state.current_page == "Settings":
+        show_settings()
 
 def load_profile_data():
     """Load user profile data from API"""
     try:
-        response = requests.get(f"{API_URL}/user/profile", timeout=5)
+        response = requests.get(f"{API_URL}/users/profile", timeout=5)
         if response.status_code == 200:
             st.session_state.profile_data = response.json()
+        else:
+            st.error(f"Failed to load profile: {response.text}")
     except Exception as e:
         st.error(f"Error loading profile data: {str(e)}")
 
@@ -134,524 +272,15 @@ def load_training_plan():
         response = requests.get(f"{API_URL}/training?user_id=1", timeout=10)
         if response.status_code == 200:
             trainings = response.json()
-            st.session_state.training_plan = [t for t in trainings if t.get('plan_source') in ['coach_photo', 'ai_generated']]
-    except Exception as e:
-        st.error(f"Error loading training plan: {str(e)}")
-
-def save_profile_data(profile_data):
-    """Save user profile data to API"""
-    try:
-        response = requests.put(
-            f"{API_URL}/users/me", 
-            json=profile_data, 
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            st.session_state.profile_data = response.json()
-            return True
-        else:
-            st.error(f"Failed to save profile: {response.text}")
-            return False
-    except Exception as e:
-        st.error(f"Error saving profile: {str(e)}")
-        return False
-
-def save_training_plan(plan_data: dict):
-    """Save the parsed training plan to the database."""
-    try:
-        if "access_token" not in st.session_state:
-            st.error("Please log in first")
-            return
-            
-        token = st.session_state["access_token"]
-        print(f"Debug: Using access token: {token}")
-        
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
-        print(f"Debug: Request headers: {headers}")
-        
-        response = requests.post(
-            f"{API_URL}/plan-parser/parse-and-save",
-            json=plan_data,
-            headers=headers
-        )
-        print(f"Debug: Save response status: {response.status_code}")
-        print(f"Debug: Save response text: {response.text}")
-        
-        if response.status_code == 200:
-            st.success("Training plan saved successfully!")
-        else:
-            st.error(f"Error saving training plan: {response.text}")
-    except Exception as e:
-        st.error(f"Error saving training plan: {str(e)}")
-        print(f"Debug: Save error: {str(e)}")
-
-def upload_file():
-    """Handle file upload and processing."""
-    try:
-        if "access_token" not in st.session_state:
-            st.error("Please log in first")
-            return
-            
-        token = st.session_state["access_token"]
-        print(f"Debug: Using access token for upload: {token}")
-        
-        uploaded_file = st.file_uploader("Upload your training plan image", type=["jpg", "jpeg", "png"])
-        if uploaded_file is not None:
-            # Display the uploaded image
-            image = Image.open(uploaded_file)
-            st.image(image, caption="Uploaded Training Plan", use_column_width=True)
-            
-            # Convert the image to base64
-            buffered = BytesIO()
-            image.save(buffered, format="JPEG")
-            img_str = base64.b64encode(buffered.getvalue()).decode()
-            
-            # Prepare the request
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            }
-            print(f"Debug: Upload request headers: {headers}")
-            
-            data = {
-                "image": img_str,
-                "filename": uploaded_file.name
-            }
-            
-            # Send the request
-            response = requests.post(
-                f"{API_URL}/plan-parser/upload-image",
-                json=data,
-                headers=headers
-            )
-            print(f"Debug: Upload response status: {response.status_code}")
-            print(f"Debug: Upload response text: {response.text}")
-            
-            if response.status_code == 200:
-                result = response.json()
-                st.success("✅ Plan parsed successfully!")
-                # Store the result in session state and redirect
-                st.session_state.parsed_plan = result
-                st.session_state.active_page = "Training Plan"
-                st.rerun()
-            else:
-                st.error(f"Error processing image: {response.text}")
-    except Exception as e:
-        st.error(f"Error processing image: {str(e)}")
-        print(f"Debug: Upload error: {str(e)}")
-
-def show_dashboard():
-    st.header("🏃 AI Running Coach Dashboard")
-
-    # Get AI insights for dashboard
-    try:
-        insights_response = requests.get(f"{API_URL}/ai-coach/quick-insights", timeout=10)
-        if insights_response.status_code == 200:
-            insights = insights_response.json()
-            has_data = "error" not in insights
-        else:
-            has_data = False
-            insights = {}
-    except:
-        has_data = False
-        insights = {}
-
-    if has_data:
-        # AI Insights Section
-        st.subheader("🤖 AI Coach Insights")
-        with st.container():
-            st.info("📊 **Your Training Analysis**")
-            st.write(insights.get("ai_summary", "No insights available"))
-
-        # Real Training Metrics
-        st.subheader("📈 Your Training Metrics (Last 2 Weeks)")
-        col1, col2, col3, col4 = st.columns(4)
-
-        with col1:
-            weekly_dist = insights.get("weekly_distance", 0)
-            st.metric("Weekly Distance", f"{weekly_dist:.1f} km")
-        with col2:
-            weekly_freq = insights.get("weekly_frequency", 0)
-            st.metric("Weekly Frequency", f"{weekly_freq:.1f} runs")
-        with col3:
-            avg_pace = insights.get("average_pace", "N/A")
-            st.metric("Average Pace", f"{avg_pace}/km" if avg_pace != "N/A" else avg_pace)
-        with col4:
-            longest = insights.get("longest_run", 0)
-            st.metric("Longest Run", f"{longest:.1f} km")
-
-        # Training Summary
-        st.subheader("🎯 Recent Activity Summary")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Total Activities", insights.get("total_activities", 0))
-        with col2:
-            if st.button("🔍 Get Detailed Analysis", type="primary"):
-                with st.spinner("Analyzing your training data..."):
-                    try:
-                        analysis_response = requests.get(f"{API_URL}/ai-coach/analysis?days_back=30", timeout=15)
-                        if analysis_response.status_code == 200:
-                            detailed = analysis_response.json()
-                            if "ai_insights" in detailed:
-                                st.success("✅ Analysis Complete!")
-                                st.markdown("### 📋 Detailed AI Analysis")
-                                st.write(detailed["ai_insights"])
-                            else:
-                                st.warning("Analysis completed but no AI insights available")
-                        else:
-                            st.error("Failed to get detailed analysis")
-                    except Exception as e:
-                        st.error(f"Error getting analysis: {e}")
-    else:
-        # Fallback for no data
-        st.subheader("🚀 Welcome to Your AI Running Coach!")
-        st.info("💡 **Connect your Strava account to unlock AI coaching features!**")
-        st.write("Once connected, you'll see:")
-        st.write("• 🤖 **Personalized AI insights** based on your actual running data")
-        st.write("• 📊 **Real training metrics** from your activities")
-        st.write("• 🎯 **Specific recommendations** for improving your performance")
-        st.write("• 📈 **Progress tracking** and trend analysis")
-
-        if st.button("Connect Strava Now", type="primary"):
-            st.info("💡 **Go to 'Strava' page** (in the sidebar) to connect your account!")
-
-    # General Training Tips (always show)
-    st.subheader("💡 Today's Training Tips")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.info("**🏃 Easy Run Focus**")
-        st.write("80% of your runs should be at an easy, conversational pace")
-    with col2:
-        st.info("**💤 Recovery is Key**")
-        st.write("Listen to your body and prioritize sleep and nutrition")
-
-def show_training_plan():
-    st.header("Training Plan")
-    
-    # Check if we have a newly parsed plan
-    if "parsed_plan" in st.session_state:
-        plan = st.session_state.parsed_plan
-        st.success("✅ New training plan loaded!")
-        
-        # Display plan title and duration
-        st.subheader(plan["title"])
-        st.write(f"Duration: {plan['duration_weeks']} weeks")
-        
-        # Display weekly structure
-        st.subheader("Weekly Structure")
-        for week in plan["weekly_structure"]:
-            st.markdown(f"### Week {week['week_number']} - Total Distance: {week['total_distance']:.1f} km")
-            
-            # Create a DataFrame for the table
-            table_data = {
-                "Day": [],
-                "Workout": [],
-                "Distance (km)": []
-            }
-            
-            for workout in week["workouts"]:
-                table_data["Day"].append(workout["day"])
-                table_data["Workout"].append(workout["description"])
-                table_data["Distance (km)"].append(f"{workout['distance']:.1f}")
-            
-            # Display as a table
-            st.table(pd.DataFrame(table_data))
-            st.markdown("---")
-        
-        # Clear the parsed plan from session state
-        del st.session_state.parsed_plan
-        return
-    
-    # Fetch actual training data from the database
-    try:
-        response = requests.get(f"{API_URL}/training?user_id=1", timeout=10)
-        if response.status_code == 200:
-            trainings = response.json()
             # Filter for planned/coach-generated workouts
             plan_workouts = [t for t in trainings if t.get('plan_source') in ['coach_photo', 'ai_generated']]
         else:
             plan_workouts = []
-    except Exception:
+    except Exception as e:
+        st.error(f"Error loading training plan: {str(e)}")
         plan_workouts = []
     
-    if not plan_workouts:
-        # No plan uploaded yet
-        st.info("🚀 **No training plan loaded yet!**")
-        st.write("Upload a training plan photo in the Coach Chat page to see your dynamic plan here.")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("📷 Upload Training Plan", type="primary"):
-                st.info("💡 **Go to 'Coach Chat' page** (in the sidebar) to upload a training plan photo!")
-        with col2:
-            if st.button("🤖 Generate AI Plan", type="secondary"):
-                with st.spinner("Generating personalized training plan..."):
-                    try:
-                        generate_response = requests.post(f"{API_URL}/ai-coach/generate-plan", 
-                                                        json={"user_id": 1, "weeks": 4}, timeout=30)
-                        if generate_response.status_code == 200:
-                            st.success("✅ AI training plan generated!")
-                            st.rerun()
-                        else:
-                            st.error("Failed to generate AI plan")
-                    except Exception as e:
-                        st.error(f"Error generating plan: {e}")
-        return
-    
-    # Plan exists - show dynamic content
-    plan_source = plan_workouts[0].get('plan_source', 'unknown')
-    plan_title = plan_workouts[0].get('plan_title', 'Training Plan')
-    
-    # Plan Overview
-    st.subheader(f"📊 Current Plan: {plan_title}")
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Total Workouts", len(plan_workouts))
-    with col2:
-        source_emoji = "📷" if plan_source == "coach_photo" else "🤖"
-        st.metric("Source", f"{source_emoji} {plan_source.replace('_', ' ').title()}")
-    with col3:
-        # Calculate date range
-        dates = [datetime.fromisoformat(t['date']) for t in plan_workouts]
-        if dates:
-            duration_days = (max(dates) - min(dates)).days
-            duration_weeks = duration_days // 7 + 1
-            st.metric("Duration", f"{duration_weeks} weeks")
-    
-    # AI Analysis & Recommendations
-    st.subheader("🤖 AI Plan Analysis")
-    
-    # Get AI analysis of the current plan
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        if st.button("🔍 Analyze Plan with AI", type="secondary"):
-            with st.spinner("AI analyzing your training plan..."):
-                try:
-                    # Fetch the parsed plan data
-                    plan_response = requests.get(f"{API_URL}/training?user_id=1", timeout=10)
-                    if plan_response.status_code == 200:
-                        plan_workouts = plan_response.json()
-                        # Filter for planned/coach-generated workouts
-                        plan_workouts = [t for t in plan_workouts if t.get('plan_source') in ['coach_photo', 'ai_generated']]
-                        
-                        # Prepare the plan data for analysis
-                        plan_data = {
-                            "plan_title": plan_workouts[0].get('plan_title', 'Training Plan'),
-                            "workouts": plan_workouts
-                        }
-                        
-                        # Send the plan data for analysis
-                        analysis_response = requests.post(
-                            f"{API_URL}/chat/message",
-                            json={"message": f"Please analyze this training plan and provide specific feedback on the structure, intensity distribution, and any recommendations for improvements. Plan data: {plan_data}"},
-                            timeout=20
-                        )
-                        if analysis_response.status_code == 200:
-                            analysis = analysis_response.json()["message"]
-                            st.session_state.plan_analysis = analysis
-                            st.rerun()
-                        else:
-                            st.error("Failed to get AI analysis")
-                    else:
-                        st.error("Failed to fetch plan data")
-                except Exception as e:
-                    st.error(f"Error getting analysis: {e}")
-    
-    with col2:
-        if st.button("💡 Get Modifications", type="primary"):
-            with st.spinner("AI suggesting plan modifications..."):
-                try:
-                    mod_response = requests.post(
-                        f"{API_URL}/chat/message",
-                        json={"message": "Based on my current training plan and recent Strava activities, what specific modifications would you recommend? Please be specific about which workouts to change and why."},
-                        timeout=20
-                    )
-                    if mod_response.status_code == 200:
-                        modifications = mod_response.json()["message"]
-                        st.session_state.plan_modifications = modifications
-                        st.rerun()
-                    else:
-                        st.error("Failed to get modifications")
-                except Exception as e:
-                    st.error(f"Error getting modifications: {e}")
-    
-    # Show AI analysis if available
-    if "plan_analysis" in st.session_state:
-        with st.expander("📊 **AI Plan Analysis**", expanded=True):
-            st.write(st.session_state.plan_analysis)
-    
-    # Show AI modifications if available
-    if "plan_modifications" in st.session_state:
-        with st.expander("💡 **AI Recommended Modifications**", expanded=True):
-            st.write(st.session_state.plan_modifications)
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("✅ Apply Suggestions", type="primary"):
-                    st.info("Feature coming soon: Automatic plan modifications based on AI suggestions!")
-            with col2:
-                if st.button("🔄 Get New Suggestions"):
-                    del st.session_state.plan_modifications
-                    st.rerun()
-    
-    # Training Schedule by Week
-    st.subheader("📅 Weekly Training Schedule")
-    
-    # Group workouts by week
-    workouts_by_week = {}
-    for workout in plan_workouts:
-        workout_date = datetime.fromisoformat(workout['date'])
-        # Calculate week number from start of plan
-        start_date = min(datetime.fromisoformat(t['date']) for t in plan_workouts)
-        week_num = ((workout_date - start_date).days // 7) + 1
-        
-        if week_num not in workouts_by_week:
-            workouts_by_week[week_num] = {}
-        
-        # Create a unique key for each workout based on date and type
-        workout_key = f"{workout_date.strftime('%Y-%m-%d')}_{workout.get('type', '')}"
-        
-        # If we already have a workout for this day and type, keep the one with more details
-        if workout_key in workouts_by_week[week_num]:
-            existing = workouts_by_week[week_num][workout_key]
-            # Keep the workout with the longer description or more details
-            if len(workout.get('description', '')) > len(existing.get('description', '')):
-                workouts_by_week[week_num][workout_key] = workout
-        else:
-            workouts_by_week[week_num][workout_key] = workout
-    
-    # Display each week
-    for week_num in sorted(workouts_by_week.keys()):
-        # Convert dictionary values to list and sort by date
-        week_workouts = sorted(workouts_by_week[week_num].values(), key=lambda x: x['date'])
-        
-        with st.expander(f"📊 **Week {week_num}** ({len(week_workouts)} workouts)", expanded=week_num <= 2):
-            # Week statistics
-            distances = [w.get('distance', 0) or 0 for w in week_workouts]
-            total_distance = sum(distances)
-            workout_types = [w.get('type', 'unknown') for w in week_workouts]
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Total Distance", f"{total_distance:.1f} km")
-            with col2:
-                st.metric("Workouts", len(week_workouts))
-            with col3:
-                intensity_mix = len(set(workout_types))
-                st.metric("Variety", f"{intensity_mix} types")
-            
-            # Daily schedule
-            st.write("**Daily Schedule:**")
-            for workout in week_workouts:
-                workout_date = datetime.fromisoformat(workout['date'])
-                day_name = workout_date.strftime('%A')
-                
-                col1, col2, col3, col4 = st.columns([1, 2, 2, 1])
-                with col1:
-                    st.write(f"**{day_name}**")
-                with col2:
-                    workout_type = workout.get('type', 'unknown').replace('_', ' ').title()
-                    type_emoji = {
-                        'Easy Run': '🏃', 'Long Run': '🏃‍♂️', 'Intervals': '⚡', 
-                        'Tempo': '🔥', 'Hills': '⛰️', 'Recovery': '😌', 'Rest': '😴'
-                    }.get(workout_type, '🏃')
-                    st.write(f"{type_emoji} {workout_type}")
-                with col3:
-                    description = workout.get('description', 'No description')
-                    st.write(description)
-                with col4:
-                    distance = workout.get('distance')
-                    if distance:
-                        st.write(f"{distance:.1f}km")
-                    else:
-                        st.write("-")
-    
-    # Plan Management
-    st.subheader("⚙️ Plan Management")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        if st.button("📷 Upload New Plan"):
-            st.info("💡 **Go to 'Coach Chat' page** (in the sidebar) to upload a new training plan photo!")
-    
-    with col2:
-        if st.button("🗑️ Clear Current Plan", type="secondary"):
-            if st.session_state.get("confirm_clear", False):
-                try:
-                    delete_response = requests.delete(
-                        f"{API_URL}/training/clear-plan",
-                        params={"user_id": 1},
-                        timeout=10
-                    )
-                    if delete_response.status_code == 200:
-                        st.success("✅ Training plan cleared!")
-                        st.session_state.confirm_clear = False
-                        st.rerun()
-                    else:
-                        st.error(f"Failed to clear plan: {delete_response.text}")
-                except Exception as e:
-                    st.error(f"Error clearing plan: {e}")
-            else:
-                st.session_state.confirm_clear = True
-                st.warning("⚠️ Click again to confirm deletion of current plan")
-                st.rerun()
-    
-    with col3:
-        if st.button("📤 Export Plan"):
-            import io
-            output = io.StringIO()
-            output.write("Date,Day,Type,Description,Distance (km),Intensity\n")
-            for workout in sorted(plan_workouts, key=lambda x: x['date']):
-                date = workout['date']
-                day = datetime.fromisoformat(date).strftime('%A')
-                workout_type = workout.get('type', '').replace('_', ' ').title()
-                description = workout.get('description', '').replace(',', ';')
-                distance = workout.get('distance', 0) or 0
-                intensity = workout.get('intensity', '')
-                output.write(f"{date},{day},{workout_type},{description},{distance},{intensity}\n")
-            
-            st.download_button(
-                label="💾 Download as CSV",
-                data=output.getvalue(),
-                file_name=f"training_plan_{plan_title.replace(' ', '_')}.csv",
-                mime="text/csv"
-            )
-    
-    # Integration with Strava
-    st.subheader("🔗 Integration Status")
-    
-    try:
-        # Check Strava connection
-        strava_response = requests.get(f"{API_URL}/strava/connection/status", timeout=5)
-        if strava_response.status_code == 200 and strava_response.json().get("connected"):
-            st.success("✅ Strava connected - Plan workouts can be compared with actual activities")
-            
-            if st.button("📊 Compare Plan vs Actual Performance"):
-                with st.spinner("Analyzing plan adherence..."):
-                    try:
-                        comparison_response = requests.post(
-                            f"{API_URL}/chat/message",
-                            json={"message": "Compare my training plan workouts with my actual Strava activities. How well am I following the plan and what adjustments should I make?"},
-                            timeout=20
-                        )
-                        if comparison_response.status_code == 200:
-                            comparison = comparison_response.json()["message"]
-                            st.info("📈 **Plan vs Actual Analysis:**")
-                            st.write(comparison)
-                    except Exception as e:
-                        st.error(f"Error getting comparison: {e}")
-        else:
-            st.info("ℹ️ Connect Strava to compare planned vs actual workouts")
-            if st.button("🔗 Connect Strava"):
-                st.info("💡 **Go to 'Strava' page** (in the sidebar) to connect your account!")
-    except:
-        st.warning("⚠️ Unable to check Strava connection status")
+    return plan_workouts
 
 def show_daily_log():
     st.header("Daily Training Log")
@@ -696,41 +325,66 @@ def show_daily_log():
         st.success("Daily log saved successfully!")
 
 def show_progress():
-    st.header("Progress Tracking")
+    """Show progress metrics and charts."""
+    st.header("Progress")
     
-    # Time Period Selection
-    period = st.selectbox("View Period", ["Last Week", "Last Month", "Last 3 Months", "Year to Date"])
-    
-    # Key Metrics
-    st.subheader("Training Metrics")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Weekly Average", "45.2 km", "+2.3 km")
-    with col2:
-        st.metric("Monthly Volume", "180.8 km", "+15.5 km")
-    with col3:
-        st.metric("Year to Date", "1,205 km", None)
-    
-    # Progress Graphs
-    weekly_data = {
-        'Week': list(range(1, 11)),
-        'Distance': [40, 42, 45, 43, 46, 44, 48, 45, 47, 45],
-        'Long Run': [15, 16, 16, 15, 17, 16, 18, 16, 17, 16]
-    }
-    df = pd.DataFrame(weekly_data)
-    
-    fig1 = px.line(df, x='Week', y=['Distance', 'Long Run'], 
-                  title='Weekly Distance Progression')
-    st.plotly_chart(fig1, use_container_width=True)
-    
-    # Race Times
-    st.subheader("Race Times")
-    times = {
-        'Distance': ['5K', '10K', 'Half Marathon', 'Marathon'],
-        'Personal Best': ['20:30', '43:15', '1:35:00', '3:35:00'],
-        'Recent': ['20:45', '44:00', '1:37:00', '-']
-    }
-    st.table(pd.DataFrame(times))
+    # Get metrics data
+    try:
+        response = requests.get(f"{API_URL}/metrics?user_id=1", timeout=5)
+        if response.status_code == 200:
+            metrics_data = response.json()
+            
+            # Convert to DataFrame for easier plotting
+            df = pd.DataFrame(metrics_data)
+            df['date'] = pd.to_datetime(df['date'])
+            
+            # Filter last 2 weeks
+            two_weeks_ago = pd.Timestamp.now() - pd.Timedelta(days=14)
+            df = df[df['date'] >= two_weeks_ago]
+            
+            if not df.empty:
+                st.subheader("📈 Your Training Metrics (Last 2 Weeks)")
+                
+                # Create tabs for different metrics
+                tab1, tab2, tab3 = st.tabs(["Distance", "Pace", "Heart Rate"])
+                
+                with tab1:
+                    # Distance chart
+                    fig = px.line(df, x='date', y='distance',
+                                title='Distance Over Time',
+                                labels={'distance': 'Distance (km)', 'date': 'Date'})
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with tab2:
+                    # Pace chart
+                    fig = px.line(df, x='date', y='pace',
+                                title='Pace Over Time',
+                                labels={'pace': 'Pace (min/km)', 'date': 'Date'})
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with tab3:
+                    # Heart rate chart
+                    fig = px.line(df, x='date', y='heart_rate',
+                                title='Heart Rate Over Time',
+                                labels={'heart_rate': 'Heart Rate (bpm)', 'date': 'Date'})
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                # Summary statistics
+                st.subheader("📊 Summary Statistics")
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric("Total Distance", f"{df['distance'].sum():.1f} km")
+                with col2:
+                    st.metric("Average Pace", f"{df['pace'].mean():.1f} min/km")
+                with col3:
+                    st.metric("Average Heart Rate", f"{df['heart_rate'].mean():.0f} bpm")
+            else:
+                st.info("No metrics data available for the last 2 weeks.")
+        else:
+            st.error(f"Failed to load metrics: {response.text}")
+    except Exception as e:
+        st.error(f"Error loading metrics: {str(e)}")
 
 def show_profile():
     st.header("Runner Profile")
@@ -800,171 +454,287 @@ def show_profile():
                 st.rerun()
 
 def show_strava():
-    st.header("🚴 Strava Integration")
+    st.header("Strava Integration")
     
-    # Handle disconnection state
-    if st.session_state.get("strava_disconnected", False):
-        st.session_state.strava_disconnected = False
-        st.info("Refreshing connection status...")
-        
-    # Check connection status
+    # Check Strava connection status without authentication for testing
     try:
-        response = requests.get(f"{API_URL}/strava/connection/status", timeout=5)
-        if response.status_code == 200:
-            status = response.json()
-            is_connected = status.get("connected", False)
-            athlete_info = status.get("athlete")
-        else:
-            is_connected = False
-            athlete_info = None
-    except Exception:
-        is_connected = False
-        athlete_info = None
-    
-    if is_connected:
-        # Show connected status
-        if athlete_info:
-            st.success(f"✅ Connected to Strava as {athlete_info.get('firstname', '')} {athlete_info.get('lastname', '')}")
+        # FOR TESTING: Use test endpoints without authentication
+        # strava_response = requests.get(f"{API_URL}/auth/strava/connection/status", headers=get_headers(), timeout=5)
+        strava_response = requests.get(f"{API_URL}/auth/strava/test/connection/status", timeout=5)
+        if strava_response.status_code == 200 and strava_response.json().get("connected"):
+            st.success("✅ Strava connected!")
             
-            col1, col2 = st.columns(2)
+            # Show disconnect button
+            if st.button("🔌 Disconnect Strava"):
+                try:
+                    # disconnect_response = requests.post(f"{API_URL}/auth/strava/disconnect", headers=get_headers(), timeout=5)
+                    disconnect_response = requests.post(f"{API_URL}/auth/strava/test/disconnect", timeout=5)
+                    if disconnect_response.status_code == 200:
+                        st.success("✅ Strava disconnected!")
+                        st.rerun()
+                    else:
+                        st.error("Failed to disconnect Strava")
+                except Exception as e:
+                    st.error(f"Error disconnecting: {e}")
+            
+            # Show recent activities
+            st.subheader("Recent Activities")
+            
+            # Initialize session state for activities count
+            if 'num_activities' not in st.session_state:
+                st.session_state.num_activities = 10
+            
+            # Add controls for number of activities
+            col1, col2, col3 = st.columns([1, 1, 2])
             with col1:
-                st.metric("Athlete ID", athlete_info.get("id", "N/A"))
+                if st.button("5 Activities"):
+                    st.session_state.num_activities = 5
+                    st.rerun()
             with col2:
-                st.metric("Location", athlete_info.get("city", "Unknown"))
+                if st.button("10 Activities"):
+                    st.session_state.num_activities = 10
+                    st.rerun()
+            with col3:
+                if st.button("20 Activities"):
+                    st.session_state.num_activities = 20
+                    st.rerun()
+            
+            try:
+                # activities_response = requests.get(f"{API_URL}/auth/strava/activities", headers=get_headers(), params={"limit": st.session_state.num_activities}, timeout=10)
+                activities_response = requests.get(f"{API_URL}/auth/strava/test/activities", params={"limit": st.session_state.num_activities}, timeout=10)
+                if activities_response.status_code == 200:
+                    activities = activities_response.json()
+                    if activities:
+                        st.write(f"Showing **{len(activities)}** recent activities:")
+                        
+                        for activity in activities:
+                            # Format the date nicely
+                            start_date = activity.get('start_date', '')
+                            formatted_date = "Unknown Date"
+                            if start_date:
+                                try:
+                                    from datetime import datetime
+                                    # Parse ISO date and format it nicely
+                                    date_obj = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                                    formatted_date = date_obj.strftime('%B %d, %Y at %I:%M %p')  # e.g., "January 15, 2024 at 7:00 AM"
+                                except:
+                                    # Fallback to just the date part if parsing fails
+                                    formatted_date = start_date[:10]  # Just show YYYY-MM-DD
+                            
+                            # Display activity in an expander with key metrics
+                            with st.expander(f"🏃 {activity.get('name', 'Unknown Activity')} - {formatted_date}"):
+                                # First row - Most important metrics (larger)
+                                st.markdown("### **Key Metrics**")
+                                col1, col2, col3 = st.columns(3)
+                                
+                                with col1:
+                                    # Distance (convert meters to km)
+                                    distance_m = activity.get('distance', 0)
+                                    distance_km = distance_m / 1000
+                                    st.markdown(f"""
+                                    <div class="metric-container">
+                                        <div class="metric-label">Distance</div>
+                                        <div class="metric-value">{distance_km:.1f} km</div>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                                
+                                with col2:
+                                    # Average speed (convert m/s to km/h) and calculate pace
+                                    avg_speed = activity.get('average_speed')
+                                    if avg_speed and avg_speed > 0:
+                                        speed_kmh = avg_speed * 3.6  # m/s to km/h
+                                        pace_min_per_km = 1000 / (avg_speed * 60)  # min/km
+                                        # Convert to minutes:seconds format
+                                        minutes = int(pace_min_per_km)
+                                        seconds = int((pace_min_per_km - minutes) * 60)
+                                        pace_str = f"{minutes}:{seconds:02d} min/km"
+                                        st.markdown(f"""
+                                        <div class="metric-container">
+                                            <div class="metric-label">Pace</div>
+                                            <div class="metric-value">{pace_str}</div>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+                                    else:
+                                        st.markdown(f"""
+                                        <div class="metric-container">
+                                            <div class="metric-label">Pace</div>
+                                            <div class="metric-value">N/A</div>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+                                
+                                with col3:
+                                    # Moving time (convert seconds to minutes)
+                                    moving_time_s = activity.get('moving_time', 0)
+                                    moving_time_min = moving_time_s / 60
+                                    st.markdown(f"""
+                                    <div class="metric-container">
+                                        <div class="metric-label">Time</div>
+                                        <div class="metric-value">{moving_time_min:.0f} min</div>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+
+                                # Centered block for Avg HR, Max HR, Cadence, Max Speed
+                                st.markdown('<div class="metrics-center-block">', unsafe_allow_html=True)
+                                
+                                # First row: Avg HR, Max HR
+                                col_hr1, col_hr2 = st.columns(2)
+                                with col_hr1:
+                                    avg_hr = activity.get('average_heartrate')
+                                    if avg_hr:
+                                        st.markdown(f"""
+                                        <div class="metric-container">
+                                            <div class="metric-label">Avg HR</div>
+                                            <div class="metric-value">{avg_hr:.0f} bpm</div>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+                                    else:
+                                        st.markdown(f"""
+                                        <div class="metric-container">
+                                            <div class="metric-label">Avg HR</div>
+                                            <div class="metric-value">N/A</div>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+                                with col_hr2:
+                                    max_hr = activity.get('max_heartrate')
+                                    if max_hr:
+                                        st.markdown(f"""
+                                        <div class="metric-container">
+                                            <div class="metric-label">Max HR</div>
+                                            <div class="metric-value">{max_hr:.0f} bpm</div>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+                                    else:
+                                        st.markdown(f"""
+                                        <div class="metric-container">
+                                            <div class="metric-label">Max HR</div>
+                                            <div class="metric-value">N/A</div>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+                                
+                                # Second row: Cadence, Max Speed
+                                col_cad1, col_cad2 = st.columns(2)
+                                with col_cad1:
+                                    avg_cadence = activity.get('average_cadence')
+                                    if avg_cadence:
+                                        st.markdown(f"""
+                                        <div class="metric-container">
+                                            <div class="metric-label">Cadence</div>
+                                            <div class="metric-value">{avg_cadence:.0f} spm</div>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+                                    else:
+                                        st.markdown(f"""
+                                        <div class="metric-container">
+                                            <div class="metric-label">Cadence</div>
+                                            <div class="metric-value">N/A</div>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+                                with col_cad2:
+                                    # Max speed converted to max pace
+                                    max_speed = activity.get('max_speed')
+                                    if max_speed and max_speed > 0:
+                                        # Calculate max pace (same method as average pace)
+                                        max_pace_min_per_km = 1000 / (max_speed * 60)  # min/km
+                                        # Convert to minutes:seconds format
+                                        minutes = int(max_pace_min_per_km)
+                                        seconds = int((max_pace_min_per_km - minutes) * 60)
+                                        max_pace_str = f"{minutes}:{seconds:02d} min/km"
+                                        st.markdown(f"""
+                                        <div class="metric-container">
+                                            <div class="metric-label">Max Pace</div>
+                                            <div class="metric-value">{max_pace_str}</div>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+                                    else:
+                                        st.markdown(f"""
+                                        <div class="metric-container">
+                                            <div class="metric-label">Max Pace</div>
+                                            <div class="metric-value">N/A</div>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+                                
+                                st.markdown('</div>', unsafe_allow_html=True)
+
+                                # Additional info
+                                st.markdown("---")
+                                
+                                # Activity type and elevation
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.write(f"**Type:** {activity.get('type', 'Unknown')}")
+                                with col2:
+                                    elevation = activity.get('total_elevation_gain')
+                                    if elevation:
+                                        st.write(f"**Elevation:** {elevation:.0f} m")
+                                    else:
+                                        st.write("**Elevation:** N/A")
+                                
+                                # Location info if available
+                                location_parts = []
+                                if activity.get('location_city'):
+                                    location_parts.append(activity['location_city'])
+                                if activity.get('location_state'):
+                                    location_parts.append(activity['location_state'])
+                                if activity.get('location_country'):
+                                    location_parts.append(activity['location_country'])
+                                
+                                if location_parts:
+                                    st.write(f"**Location:** {', '.join(location_parts)}")
+                                
+                                # Description if available
+                                if activity.get('description'):
+                                    st.write(f"**Description:** {activity.get('description')}")
+                                
+                                # Route/map info if available
+                                if activity.get('map') and activity['map'].get('summary_polyline'):
+                                    st.write("**Route:** Map data available")
+                    else:
+                        st.info("No recent activities found")
+                else:
+                    st.error("Failed to load activities")
+            except Exception as e:
+                st.error(f"Error loading activities: {e}")
         else:
-            st.success("✅ Connected to Strava")
-            st.info("Loading athlete information...")
-        
-        # Import activities section
-        st.subheader("Import Activities")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            days_back = st.number_input("Days to import", min_value=1, max_value=365, value=30)
-        
-        with col2:
-            st.write("")  # Spacing
-            if st.button("Import Activities"):
-                with st.spinner("Importing activities from Strava..."):
-                    try:
-                        import_response = requests.post(
-                            f"{API_URL}/strava/activities/import",
-                            params={"days_back": days_back},
-                            timeout=30
-                        )
-                        if import_response.status_code == 200:
-                            result = import_response.json()
-                            st.success(f"✅ {result['message']}")
+            st.info("ℹ️ Connect your Strava account to sync your activities")
+            
+            # Show connect button
+            if st.button("🔗 Connect Strava"):
+                try:
+                    # auth_response = requests.get(f"{API_URL}/auth/strava/authorize", headers=get_headers(), timeout=5)
+                    auth_response = requests.get(f"{API_URL}/auth/strava/test/authorize", timeout=5)
+                    if auth_response.status_code == 200:
+                        auth_url = auth_response.json().get("url")
+                        if auth_url:
+                            st.markdown(f"[Click here to connect your Strava account]({auth_url})")
                         else:
-                            st.error("Failed to import activities")
-                    except Exception as e:
-                        st.error(f"Error importing activities: {e}")
+                            st.error("No authorization URL received")
+                    else:
+                        st.error("Failed to get authorization URL")
+                except Exception as e:
+                    st.error(f"Error getting authorization URL: {e}")
+    except Exception as e:
+        st.error(f"Error checking Strava connection: {e}")
+        st.info("ℹ️ Connect your Strava account to sync your activities")
         
-        # Show activity statistics
-        st.subheader("Activity Statistics")
-        try:
-            stats_response = requests.get(f"{API_URL}/strava/activities/stats", timeout=5)
-            if stats_response.status_code == 200:
-                stats = stats_response.json()
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Total Activities", stats["total_activities"])
-                with col2:
-                    st.metric("Total Distance", f"{stats['total_distance_km']} km")
-                with col3:
-                    st.metric("Total Time", f"{stats['total_time_hours']} hours")
-                
-                # Activity types breakdown
-                if stats["activity_types"]:
-                    st.subheader("Activity Types")
-                    for activity_type, data in stats["activity_types"].items():
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.write(f"**{activity_type}**")
-                        with col2:
-                            st.write(f"{data['count']} activities, {data['distance_km']:.1f} km")
-        except Exception:
-            st.warning("Could not load activity statistics")
-        
-        # Show recent activities
-        st.subheader("Recent Activities")
-        try:
-            activities_response = requests.get(f"{API_URL}/strava/activities?limit=10", timeout=5)
-            if activities_response.status_code == 200:
-                activities = activities_response.json()
-                
-                if activities:
-                    for activity in activities:
-                        with st.expander(f"{activity['name']} ({activity['type']})"):
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.write(f"**Distance:** {activity['distance_km']:.2f} km")
-                                st.write(f"**Duration:** {activity['duration']}")
-                            with col2:
-                                if activity['pace_per_km']:
-                                    st.write(f"**Pace:** {activity['pace_per_km']}/km")
-                                if activity['average_heartrate']:
-                                    st.write(f"**Avg HR:** {activity['average_heartrate']:.0f} bpm")
-                            with col3:
-                                if activity['total_elevation_gain']:
-                                    st.write(f"**Elevation:** {activity['total_elevation_gain']:.0f} m")
-                                if activity['calories']:
-                                    st.write(f"**Calories:** {activity['calories']:.0f}")
-                else:
-                    st.info("No activities imported yet. Click 'Import Activities' to get started!")
-        except Exception:
-            st.warning("Could not load recent activities")
-        
-        # Disconnect option
-        st.subheader("Manage Connection")
-        if st.button("Disconnect Strava", type="secondary"):
+        # Show connect button
+        if st.button("🔗 Connect Strava"):
             try:
-                disconnect_response = requests.delete(f"{API_URL}/strava/connection", timeout=5)
-                if disconnect_response.status_code == 200:
-                    st.success("Disconnected from Strava successfully!")
-                    # Set flag to refresh on next load instead of immediate rerun
-                    st.session_state.strava_disconnected = True
-                else:
-                    st.error("Failed to disconnect from Strava")
-            except Exception as e:
-                st.error(f"Error disconnecting: {e}")
-    
-    else:
-        # Show connect to Strava option
-        st.info("Connect your Strava account to import your activities and get personalized coaching insights!")
-        
-        st.subheader("Benefits of connecting Strava:")
-        st.write("🏃 **Automatic activity import** - Your runs, rides, and workouts")
-        st.write("📊 **Performance analysis** - Detailed metrics and trends")
-        st.write("🎯 **Personalized coaching** - AI recommendations based on your data")
-        st.write("📈 **Progress tracking** - See your improvement over time")
-        
-        if st.button("Connect to Strava", type="primary"):
-            try:
-                # Get authorization URL
-                auth_response = requests.get(f"{API_URL}/strava/auth/connect", timeout=5)
+                # auth_response = requests.get(f"{API_URL}/auth/strava/authorize", headers=get_headers(), timeout=5)
+                auth_response = requests.get(f"{API_URL}/auth/strava/test/authorize", timeout=5)
                 if auth_response.status_code == 200:
-                    auth_data = auth_response.json()
-                    auth_url = auth_data["authorization_url"]
-                    
-                    st.success("Click the link below to connect your Strava account:")
-                    st.markdown(f"[**Connect to Strava**]({auth_url})")
-                    st.info("After authorizing, you'll be redirected back to this page.")
+                    auth_url = auth_response.json().get("url")
+                    if auth_url:
+                        st.markdown(f"[Click here to connect your Strava account]({auth_url})")
+                    else:
+                        st.error("No authorization URL received")
                 else:
-                    st.error("Failed to get Strava authorization URL")
+                    st.error("Failed to get authorization URL")
             except Exception as e:
-                st.error(f"Error connecting to Strava: {e}")
-    
-    # Check for connection status in URL parameters (only show message once)
-    if "strava_connected" in st.query_params and st.query_params["strava_connected"] == "true":
-        if "strava_success_shown" not in st.session_state:
-            st.success("✅ Successfully connected to Strava!")
-            st.session_state.strava_success_shown = True
-    elif "strava_error" in st.query_params and st.query_params["strava_error"] == "true":
-        if "strava_error_shown" not in st.session_state:
-            st.error("❌ Error connecting to Strava. Please try again.")
-            st.session_state.strava_error_shown = True
+                st.error(f"Error getting authorization URL: {e}")
+
+def show_coach_chat():
+    """Show the coach chat interface - alias for show_chat()"""
+    show_chat()
 
 def show_chat():
     st.header("🤖 AI Running Coach Chat")
@@ -1024,8 +794,9 @@ def show_chat():
                     
                     # Send the request to the correct endpoint
                     response = requests.post(
-                        f"{API_URL}/plan-parser/parse-and-save",
-                        files=files
+                        f"{API_URL}/plan-parser/upload-image",
+                        files=files,
+                        params={"user_id": 1}
                     )
                     print(f"Debug: Upload response status: {response.status_code}")
                     print(f"Debug: Upload response text: {response.text}")
@@ -1425,6 +1196,337 @@ def show_workout_context():
     except:
         pass
 
+def show_training_plan():
+    st.header("Training Plan")
+    
+    # Check if we have a newly parsed plan
+    if "parsed_plan" in st.session_state:
+        plan = st.session_state.parsed_plan
+        st.success("✅ New training plan loaded!")
+        
+        # Display plan title and duration
+        st.subheader(plan["title"])
+        st.write(f"Duration: {plan['duration_weeks']} weeks")
+        
+        # Display weekly structure
+        st.subheader("Weekly Structure")
+        for week in plan["weekly_structure"]:
+            st.markdown(f"### Week {week['week_number']} - Total Distance: {week['total_distance']:.1f} km")
+            
+            # Create a DataFrame for the table
+            table_data = {
+                "Day": [],
+                "Workout": [],
+                "Distance (km)": []
+            }
+            
+            for workout in week["workouts"]:
+                table_data["Day"].append(workout["day"])
+                table_data["Workout"].append(workout["description"])
+                table_data["Distance (km)"].append(f"{workout['distance']:.1f}")
+            
+            # Display as a table
+            st.table(pd.DataFrame(table_data))
+            st.markdown("---")
+        
+        # Clear the parsed plan from session state
+        del st.session_state.parsed_plan
+        return
+    
+    # Fetch actual training data from the database
+    try:
+        response = requests.get(f"{API_URL}/training?user_id=1", timeout=10)
+        if response.status_code == 200:
+            trainings = response.json()
+            # Filter for planned/coach-generated workouts
+            plan_workouts = [t for t in trainings if t.get('plan_source') in ['coach_photo', 'ai_generated']]
+        else:
+            plan_workouts = []
+    except Exception as e:
+        st.error(f"Error loading training plan: {str(e)}")
+        plan_workouts = []
+    
+    if not plan_workouts:
+        # No plan uploaded yet
+        st.info("🚀 **No training plan loaded yet!**")
+        st.write("Upload a training plan photo in the Coach Chat page to see your dynamic plan here.")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("📷 Upload Training Plan", type="primary", key="training_plan_upload_primary"):
+                st.info("💡 **Go to 'Coach Chat' page** (in the sidebar) to upload a training plan photo!")
+        with col2:
+            if st.button("🤖 Generate AI Plan", type="secondary", key="training_plan_generate_ai"):
+                with st.spinner("Generating personalized training plan..."):
+                    try:
+                        generate_response = requests.post(f"{API_URL}/ai-coach/generate-plan", 
+                                                        json={"user_id": 1, "weeks": 4}, timeout=30)
+                        if generate_response.status_code == 200:
+                            st.success("✅ AI training plan generated!")
+                            st.rerun()
+                        else:
+                            st.error("Failed to generate AI plan")
+                    except Exception as e:
+                        st.error(f"Error generating plan: {e}")
+        return
+    
+    # Plan exists - show dynamic content
+    plan_source = plan_workouts[0].get('plan_source', 'unknown')
+    plan_title = plan_workouts[0].get('plan_title', 'Training Plan')
+    
+    # Plan Overview
+    st.subheader(f"📊 Current Plan: {plan_title}")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Workouts", len(plan_workouts))
+    with col2:
+        source_emoji = "📷" if plan_source == "coach_photo" else "🤖"
+        st.metric("Source", f"{source_emoji} {plan_source.replace('_', ' ').title()}")
+    with col3:
+        # Calculate date range
+        dates = [datetime.fromisoformat(t['date']) for t in plan_workouts]
+        if dates:
+            duration_days = (max(dates) - min(dates)).days
+            duration_weeks = duration_days // 7 + 1
+            st.metric("Duration", f"{duration_weeks} weeks")
+    
+    # AI Analysis & Recommendations
+    st.subheader("🤖 AI Plan Analysis")
+    
+    # Get AI analysis of the current plan
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        if st.button("🔍 Analyze Plan with AI", type="secondary", key="training_plan_analyze_ai"):
+            with st.spinner("AI analyzing your training plan..."):
+                try:
+                    # Fetch the parsed plan data
+                    plan_response = requests.get(f"{API_URL}/training?user_id=1", timeout=10)
+                    if plan_response.status_code == 200:
+                        plan_workouts = plan_response.json()
+                        # Filter for planned/coach-generated workouts
+                        plan_workouts = [t for t in plan_workouts if t.get('plan_source') in ['coach_photo', 'ai_generated']]
+                        
+                        # Prepare the plan data for analysis
+                        plan_data = {
+                            "plan_title": plan_workouts[0].get('plan_title', 'Training Plan'),
+                            "workouts": plan_workouts
+                        }
+                        
+                        # Send the plan data for analysis
+                        analysis_response = requests.post(
+                            f"{API_URL}/chat/message",
+                            json={"message": f"Please analyze this training plan and provide specific feedback on the structure, intensity distribution, and any recommendations for improvements. Plan data: {plan_data}"},
+                            timeout=20
+                        )
+                        if analysis_response.status_code == 200:
+                            analysis = analysis_response.json()["message"]
+                            st.session_state.plan_analysis = analysis
+                            st.rerun()
+                        else:
+                            st.error("Failed to get AI analysis")
+                    else:
+                        st.error("Failed to fetch plan data")
+                except Exception as e:
+                    st.error(f"Error getting analysis: {e}")
+    
+    with col2:
+        if st.button("💡 Get Modifications", type="primary", key="training_plan_get_modifications"):
+            with st.spinner("AI suggesting plan modifications..."):
+                try:
+                    mod_response = requests.post(
+                        f"{API_URL}/chat/message",
+                        json={"message": "Based on my current training plan and recent Strava activities, what specific modifications would you recommend? Please be specific about which workouts to change and why."},
+                        timeout=20
+                    )
+                    if mod_response.status_code == 200:
+                        modifications = mod_response.json()["message"]
+                        st.session_state.plan_modifications = modifications
+                        st.rerun()
+                    else:
+                        st.error("Failed to get modifications")
+                except Exception as e:
+                    st.error(f"Error getting modifications: {e}")
+    
+    # Show AI analysis if available
+    if "plan_analysis" in st.session_state:
+        with st.expander("📊 **AI Plan Analysis**", expanded=True):
+            st.write(st.session_state.plan_analysis)
+    
+    # Show AI modifications if available
+    if "plan_modifications" in st.session_state:
+        with st.expander("💡 **AI Recommended Modifications**", expanded=True):
+            st.write(st.session_state.plan_modifications)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Apply Suggestions", type="primary", key="training_plan_apply_suggestions"):
+                    st.info("Feature coming soon: Automatic plan modifications based on AI suggestions!")
+            with col2:
+                if st.button("🔄 Get New Suggestions", key="training_plan_new_suggestions"):
+                    del st.session_state.plan_modifications
+                    st.rerun()
+    
+    # Training Schedule by Week
+    st.subheader("📅 Weekly Training Schedule")
+    
+    # Group workouts by week
+    workouts_by_week = {}
+    for workout in plan_workouts:
+        workout_date = datetime.fromisoformat(workout['date'])
+        # Calculate week number from start of plan
+        start_date = min(datetime.fromisoformat(t['date']) for t in plan_workouts)
+        week_num = ((workout_date - start_date).days // 7) + 1
+        
+        if week_num not in workouts_by_week:
+            workouts_by_week[week_num] = {}
+        
+        # Create a unique key for each workout based on date and type
+        workout_key = f"{workout_date.strftime('%Y-%m-%d')}_{workout.get('type', '')}"
+        
+        # If we already have a workout for this day and type, keep the one with more details
+        if workout_key in workouts_by_week[week_num]:
+            existing = workouts_by_week[week_num][workout_key]
+            # Keep the workout with the longer description or more details
+            if len(workout.get('description', '')) > len(existing.get('description', '')):
+                workouts_by_week[week_num][workout_key] = workout
+        else:
+            workouts_by_week[week_num][workout_key] = workout
+    
+    # Display each week
+    for week_num in sorted(workouts_by_week.keys()):
+        # Convert dictionary values to list and sort by date
+        week_workouts = sorted(workouts_by_week[week_num].values(), key=lambda x: x['date'])
+        
+        with st.expander(f"📊 **Week {week_num}** ({len(week_workouts)} workouts)", expanded=week_num <= 2):
+            # Week statistics
+            distances = [w.get('distance', 0) or 0 for w in week_workouts]
+            total_distance = sum(distances)
+            workout_types = [w.get('type', 'unknown') for w in week_workouts]
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Distance", f"{total_distance:.1f} km")
+            with col2:
+                st.metric("Workouts", len(week_workouts))
+            with col3:
+                intensity_mix = len(set(workout_types))
+                st.metric("Variety", f"{intensity_mix} types")
+            
+            # Daily schedule
+            st.write("**Daily Schedule:**")
+            for workout in week_workouts:
+                workout_date = datetime.fromisoformat(workout['date'])
+                day_name = workout_date.strftime('%A')
+                
+                col1, col2, col3, col4 = st.columns([1, 2, 2, 1])
+                with col1:
+                    st.write(f"**{day_name}**")
+                with col2:
+                    workout_type = workout.get('type', 'unknown').replace('_', ' ').title()
+                    type_emoji = {
+                        'Easy Run': '🏃', 'Long Run': '🏃‍♂️', 'Intervals': '⚡', 
+                        'Tempo': '🔥', 'Hills': '⛰️', 'Recovery': '😌', 'Rest': '😴'
+                    }.get(workout_type, '🏃')
+                    st.write(f"{type_emoji} {workout_type}")
+                with col3:
+                    description = workout.get('description', 'No description')
+                    st.write(description)
+                with col4:
+                    distance = workout.get('distance')
+                    if distance:
+                        st.write(f"{distance:.1f}km")
+                    else:
+                        st.write("-")
+    
+    # Plan Management
+    st.subheader("⚙️ Plan Management")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("📷 Upload New Plan", key="training_plan_upload_new"):
+            st.info("💡 **Go to 'Coach Chat' page** (in the sidebar) to upload a new training plan photo!")
+    
+    with col2:
+        if st.button("🗑️ Clear Current Plan", type="secondary", key="training_plan_clear"):
+            if st.session_state.get("confirm_clear", False):
+                try:
+                    delete_response = requests.delete(
+                        f"{API_URL}/training/clear-plan",
+                        params={"user_id": 1},
+                        timeout=10
+                    )
+                    if delete_response.status_code == 200:
+                        st.success("✅ Training plan cleared!")
+                        st.session_state.confirm_clear = False
+                        st.rerun()
+                    else:
+                        st.error(f"Failed to clear plan: {delete_response.text}")
+                except Exception as e:
+                    st.error(f"Error clearing plan: {e}")
+            else:
+                st.session_state.confirm_clear = True
+                st.warning("⚠️ Click again to confirm deletion of current plan")
+                st.rerun()
+    
+    with col3:
+        if st.button("📤 Export Plan", key="training_plan_export"):
+            import io
+            output = io.StringIO()
+            output.write("Date,Day,Type,Description,Distance (km),Intensity\n")
+            for workout in sorted(plan_workouts, key=lambda x: x['date']):
+                date = workout['date']
+                day = datetime.fromisoformat(date).strftime('%A')
+                workout_type = workout.get('type', '').replace('_', ' ').title()
+                description = workout.get('description', '').replace(',', ';')
+                distance = workout.get('distance', 0) or 0
+                intensity = workout.get('intensity', '')
+                output.write(f"{date},{day},{workout_type},{description},{distance},{intensity}\n")
+            
+            st.download_button(
+                label="💾 Download as CSV",
+                data=output.getvalue(),
+                file_name=f"training_plan_{plan_title.replace(' ', '_')}.csv",
+                mime="text/csv"
+            )
+    
+    # Integration with Strava
+    st.subheader("🔗 Integration Status")
+    
+    try:
+        # Get authentication headers
+        headers = {
+            "Authorization": f"Bearer {st.session_state['access_token']}",
+            "Content-Type": "application/json"
+        }
+        
+        # Check Strava connection
+        strava_response = requests.get(f"{API_URL}/auth/strava/connection/status", headers=headers, timeout=5)
+        if strava_response.status_code == 200 and strava_response.json().get("connected"):
+            st.success("✅ Strava connected - Plan workouts can be compared with actual activities")
+            
+            if st.button("📊 Compare Plan vs Actual Performance", key="training_plan_compare_strava"):
+                with st.spinner("Analyzing plan adherence..."):
+                    try:
+                        comparison_response = requests.post(
+                            f"{API_URL}/chat/message",
+                            json={"message": "Compare my training plan workouts with my actual Strava activities. How well am I following the plan and what adjustments should I make?"},
+                            timeout=20
+                        )
+                        if comparison_response.status_code == 200:
+                            comparison = comparison_response.json()["message"]
+                            st.info("📈 **Plan vs Actual Analysis:**")
+                            st.write(comparison)
+                    except Exception as e:
+                        st.error(f"Error getting comparison: {e}")
+        else:
+            st.info("ℹ️ Connect Strava to compare planned vs actual workouts")
+            if st.button("🔗 Connect Strava", key="training_plan_connect_strava"):
+                st.info("💡 **Go to 'Strava' page** (in the sidebar) to connect your account!")
+    except:
+        st.warning("⚠️ Unable to check Strava connection status")
+
 def display_parsed_plan(plan_data: dict):
     """Display the parsed training plan data."""
     st.write("### 📋 Parsed Training Plan")
@@ -1449,6 +1551,91 @@ def display_parsed_plan(plan_data: dict):
                     st.write(f"Distance: {workout.get('distance')} km")
         
         st.write("---")
+
+def show_dashboard():
+    """Show main dashboard with overview of training plan and recent activities."""
+    st.header("🏠 Dashboard")
+    
+    # Load profile and training data
+    load_profile_data()
+    load_training_plan()
+    
+    # Quick overview section
+    st.subheader("📊 Quick Overview")
+    
+    # Initialize variables
+    plan_workouts = []
+    recent_trainings = []
+    response = None
+    
+    # Fetch recent training data
+    try:
+        response = requests.get(f"{API_URL}/training?user_id=1", timeout=10)
+        if response.status_code == 200:
+            trainings = response.json()
+            recent_trainings = [t for t in trainings if t.get('plan_source') not in ['coach_photo', 'ai_generated']]
+            plan_workouts = [t for t in trainings if t.get('plan_source') in ['coach_photo', 'ai_generated']]
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Recent Activities", len(recent_trainings[-7:]))  # Last 7 days
+            with col2:
+                if plan_workouts:
+                    st.metric("Plan Workouts", len(plan_workouts))
+                else:
+                    st.metric("Plan Workouts", 0)
+            with col3:
+                if recent_trainings:
+                    total_distance = sum(t.get('actual_distance', 0) or 0 for t in recent_trainings[-7:])
+                    st.metric("Weekly Distance", f"{total_distance:.1f} km")
+                else:
+                    st.metric("Weekly Distance", "0 km")
+        else:
+            st.info("No training data available")
+    except Exception as e:
+        st.error(f"Error loading dashboard data: {str(e)}")
+    
+    # Quick actions
+    st.subheader("🚀 Quick Actions")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("📷 Upload Plan", key="dashboard_upload_plan"):
+            st.info("💡 **Go to 'Coach Chat' page** (in the sidebar) to upload a training plan photo!")
+    
+    with col2:
+        if st.button("📝 Log Activity", key="dashboard_log_activity"):
+            st.info("💡 **Go to 'Daily Log' page** (in the sidebar) to log your activities!")
+    
+    with col3:
+        if st.button("🤖 AI Coach", key="dashboard_ai_coach"):
+            st.info("💡 **Go to 'Coach Chat' page** (in the sidebar) to chat with your AI coach!")
+    
+    # Recent activities preview
+    st.subheader("📈 Recent Activities")
+    try:
+        if response.status_code == 200 and recent_trainings:
+            recent_activities = recent_trainings[-5:]  # Show last 5 activities
+            for activity in reversed(recent_activities):
+                with st.expander(f"{activity['date']} - {activity.get('type', 'Activity')}", expanded=False):
+                    st.write(f"**Distance:** {activity.get('actual_distance', 0):.1f} km")
+                    st.write(f"**Duration:** {activity.get('actual_duration', 0)} minutes")
+                    if activity.get('notes'):
+                        st.write(f"**Notes:** {activity['notes']}")
+        else:
+            st.info("No recent activities to show")
+    except Exception as e:
+        st.error(f"Error loading recent activities: {str(e)}")
+    
+    # Link to full training plan
+    st.subheader("📋 Training Plan")
+    if plan_workouts:
+        st.success(f"✅ You have an active training plan with {len(plan_workouts)} workouts")
+        if st.button("View Full Plan", key="dashboard_view_plan"):
+            st.info("💡 **Go to 'Training Plan' page** (in the sidebar) to see your complete plan!")
+    else:
+        st.info("🚀 **No training plan loaded yet!**")
+        st.write("Upload a training plan photo in the Coach Chat page to see your dynamic plan here.")
 
 if __name__ == "__main__":
     main() 

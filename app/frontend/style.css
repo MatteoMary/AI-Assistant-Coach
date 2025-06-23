@@ -1,0 +1,71 @@
+/* Strava Activity Metrics Styling */
+
+/* Center all content */
+.stMetric {
+    text-align: center !important;
+}
+
+.stMarkdown {
+    text-align: center !important;
+}
+
+/* Target the specific metric structure */
+.stMetric > div > div {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    text-align: center !important;
+}
+
+/* Style the label (first child) */
+.stMetric > div > div > div:first-child {
+    font-size: 0.7em !important;
+    color: #666 !important;
+    margin-bottom: 4px !important;
+    text-align: center !important;
+    width: 100% !important;
+}
+
+/* Style the value (second child) */
+.stMetric > div > div > div:nth-child(2) {
+    font-size: 1.3em !important;
+    font-weight: bold !important;
+    margin-top: 0 !important;
+    text-align: center !important;
+    width: 100% !important;
+}
+
+/* Ensure the metric container is properly structured */
+.stMetric > div {
+    width: 100% !important;
+    text-align: center !important;
+}
+
+.metrics-center-block {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    margin: 0 auto 1.5em auto;
+    max-width: 700px;
+    padding: 1.2em 0.5em;
+    background: #f8f9fa;
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.03);
+}
+
+/* Metric container styling */
+.metric-container {
+    text-align: center;
+}
+
+.metric-label {
+    font-size: 0.7em;
+    color: #666;
+    margin-bottom: 4px;
+}
+
+.metric-value {
+    font-size: 1.3em;
+    font-weight: bold;
+} 
