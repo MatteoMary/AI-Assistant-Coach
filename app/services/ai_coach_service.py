@@ -8,12 +8,13 @@ from app.config import settings
 from app.models.strava import StravaActivity, ActivityType
 from app.models.user import User
 from app.models.workout_context import WorkoutContext
+from app.schemas.chat import ChatMessage
 
 
 class AICoachService:
     def __init__(self):
         self.client = OpenAI(api_key=settings.OPENAI_API_KEY) if settings.OPENAI_API_KEY else None
-        self.system_prompt = """You are an expert AI running coach with deep knowledge of training principles, exercise physiology, and performance optimization. 
+        self.system_prompt = f"""You are an expert AI running coach with deep knowledge of training principles, exercise physiology, and performance optimization. 
 
 Your role is to:
 - Analyze running data and provide personalized insights
@@ -22,13 +23,28 @@ Your role is to:
 - Recommend training adjustments based on performance trends
 - Provide motivation while maintaining realistic expectations
 
+IMPORTANT DATE INFORMATION:
+- TODAY'S DATE: {datetime.now().strftime('%A, %B %d, %Y')}
+- When users ask about the current date, always use the date above
+- Training plan dates are historical/future dates and should not be confused with today's date
+- Plan dates show when workouts are scheduled, not the current date
+
+CRITICAL INSTRUCTIONS:
+- ALWAYS reference the user's ACTUAL training plan that is provided in the context
+- NEVER generate a new training plan unless specifically asked to create one
+- When asked about the user's current plan, refer to the detailed weekly structure provided in the context
+- Base all advice on the user's existing plan, not on generic training principles
+- If the user asks "what is my plan for this week", use the "CURRENT WEEK" section from their actual plan
+- When the user asks "what is my plan for this week according to my [plan name]", look for the "CURRENT WEEK" section and list out each day's workout exactly as shown
+- If you see "CURRENT WEEK" in the context, that's the user's actual plan for this week - use it!
+
 Always be:
 - Specific and data-driven in your recommendations
 - Encouraging but realistic about progress
 - Safety-conscious and warn about overtraining
 - Focused on long-term development over short-term gains
 
-Use the athlete's actual data to provide personalized advice."""
+Use the athlete's actual data and training plan to provide personalized advice."""
 
     async def analyze_training_data(
         self, 
@@ -239,7 +255,7 @@ Please provide:
 
 Keep it concise but actionable."""}
                 ],
-                max_tokens=400,
+                max_tokens=800,
                 temperature=0.7
             )
             return response.choices[0].message.content.strip()
@@ -261,6 +277,9 @@ Keep it concise but actionable."""}
         # Get recent training data for context
         training_data = await self.analyze_training_data(session, user_id, days_back=14)
         
+        # Get parsed plan context
+        plan_context = self._get_parsed_plan_context(user_id, session)
+        
         # Build context message
         context_msg = ""
         if "error" not in training_data:
@@ -271,6 +290,9 @@ Recent training context (last 14 days):
 - Average pace: {training_data.get('average_pace_per_km', 'N/A')}
 - Recent runs: {len(training_data.get('recent_activities', []))}
 """
+        
+        if plan_context:
+            context_msg += f"\n{plan_context}"
 
         try:
             messages = [
@@ -285,7 +307,7 @@ Recent training context (last 14 days):
             response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
-                max_tokens=300,
+                max_tokens=600,
                 temperature=0.7
             )
             return response.choices[0].message.content.strip()
@@ -352,7 +374,7 @@ Weekly stats:
 
 Be specific and actionable."""}
                 ],
-                max_tokens=200,
+                max_tokens=400,
                 temperature=0.7
             )
             return response.choices[0].message.content.strip()
@@ -620,4 +642,126 @@ Make it progressive and appropriate for the user's fitness level."""
             
             return total_distance if total_distance > 0 else None
         except:
-            return None 
+            return None
+
+    async def get_quick_insights(self, session: Session):
+        """Get quick insights from the AI coach."""
+        return {
+            "insights": [
+                "Your training consistency has improved over the last week.",
+                "Consider adding more recovery days between intense workouts.",
+                "Your pace is trending in the right direction."
+            ]
+        }
+    
+    async def chat(self, message: str, session: Session) -> str:
+        """Chat with the AI coach."""
+        return f"I'm your AI running coach. You said: {message}. How can I help you with your training today?" 
+
+    def _get_parsed_plan_context(self, user_id: int, session: Session) -> str:
+        """Get context about user's parsed training plans"""
+        try:
+            from app.services.plan_storage_service import PlanStorageService
+            from datetime import datetime, timedelta
+            
+            storage_service = PlanStorageService()
+            
+            # Get user's parsed plans
+            plans = storage_service.get_user_plans(user_id, session)
+            
+            if not plans:
+                return ""
+            
+            # Build context string
+            context_parts = [f"User has {len(plans)} saved training plan(s):"]
+            
+            for i, plan in enumerate(plans[:2]):  # Limit to 2 plans for context
+                plan_data = storage_service.load_parsed_data(plan)
+                stats = storage_service.get_plan_statistics(plan)
+                
+                context_parts.append(f"""
+Plan {i+1}: {plan.plan_title} (parsed {plan.parsed_at.strftime('%B %Y')})
+- Duration: {stats['total_weeks']} weeks
+- Total workouts: {stats['total_workouts']}
+- Total distance: {stats['total_distance_km']:.1f} km
+- Confidence score: {plan.confidence_score}
+""")
+                
+                # Add detailed weekly structure
+                weekly_structure = plan_data.get('weekly_structure', [])
+                if weekly_structure:
+                    context_parts.append(f"Detailed Weekly Structure:")
+                    
+                    # Calculate current week - but allow for flexibility
+                    today = datetime.now().date()
+                    plan_start_date = plan.parsed_at.date()
+                    
+                    # Try to intelligently determine which week to show
+                    # First, check if the plan title contains a month name
+                    month_names = [
+                        "january", "february", "march", "april", "may", "june",
+                        "july", "august", "september", "october", "november", "december"
+                    ]
+                    
+                    plan_title_lower = plan.plan_title.lower()
+                    current_month_name = today.strftime("%B").lower()
+                    
+                    # Check if plan title mentions the current month
+                    if any(month in plan_title_lower for month in month_names):
+                        # Plan mentions a specific month
+                        if current_month_name in plan_title_lower:
+                            # We're in the month mentioned in the plan
+                            # Calculate which week of the month we're in
+                            month_start = today.replace(day=1)
+                            week_of_month = (today - month_start).days // 7
+                            
+                            if week_of_month >= len(weekly_structure) - 1:
+                                # We're in the last week of the month
+                                current_week = len(weekly_structure) - 1
+                            else:
+                                # We're in an earlier week of the month
+                                current_week = week_of_month
+                        else:
+                            # Plan mentions a different month - show the last week
+                            current_week = len(weekly_structure) - 1
+                    else:
+                        # Plan doesn't mention a specific month - use default calculation
+                        weeks_since_start = (today - plan_start_date).days // 7
+                        current_week = min(weeks_since_start, len(weekly_structure) - 1)
+                    
+                    # Show current week and next 2 weeks
+                    for week_idx in range(max(0, current_week), min(len(weekly_structure), current_week + 3)):
+                        week_data = weekly_structure[week_idx]
+                        week_label = "CURRENT WEEK" if week_idx == current_week else f"Week {week_idx + 1}"
+                        
+                        context_parts.append(f"\n{week_label}:")
+                        
+                        # Calculate week dates
+                        week_start = plan_start_date + timedelta(weeks=week_idx)
+                        week_end = week_start + timedelta(days=6)
+                        context_parts.append(f"Dates: {week_start.strftime('%b %d')} - {week_end.strftime('%b %d')}")
+                        
+                        # Show all workouts for this week
+                        workouts = week_data.get('workouts', [])
+                        for workout in workouts:
+                            day = workout.get('day', 'N/A')
+                            workout_type = workout.get('workout_type', 'N/A')
+                            description = workout.get('description', 'No description')
+                            distance = workout.get('distance', '')
+                            
+                            if distance:
+                                context_parts.append(f"  {day}: {workout_type} - {description} ({distance})")
+                            else:
+                                context_parts.append(f"  {day}: {workout_type} - {description}")
+                        
+                        # Add weekly summary
+                        total_distance = sum(float(w.get('distance', 0)) for w in workouts if w.get('distance'))
+                        context_parts.append(f"  Weekly total: {total_distance:.1f} km")
+            
+            if len(plans) > 2:
+                context_parts.append(f"\n... and {len(plans) - 2} more plans")
+            
+            return "\n".join(context_parts)
+            
+        except Exception as e:
+            return f"Error getting plan context: {str(e)}" 

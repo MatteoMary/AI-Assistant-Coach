@@ -7,10 +7,11 @@ from datetime import datetime, timedelta
 
 from app.config import settings
 from app.services.ml_plan_parser import MLPlanParser
-from app.database.session import SessionLocal
-from app.database.models import TrainingPlan
-from sqlalchemy.orm import Session
-from app.models.training import Training, WorkoutType
+from app.database import get_session
+from app.models.training import Training, WorkoutType  # Use SQLModel
+from app.models.training import TrainingPlan as SQLModelTrainingPlan  # Use SQLModel
+from app.services.plan_storage_service import PlanStorageService
+from sqlmodel import Session
 
 class PlanParserService:
     def __init__(self):
@@ -19,6 +20,7 @@ class PlanParserService:
             base_url="https://api.openai.com/v1"
         ) if settings.OPENAI_API_KEY else None
         self.ml_parser = MLPlanParser()
+        self.storage_service = PlanStorageService()
 
     def _extract_plan_text(self, structured_data: Dict[str, Any]) -> str:
         """Extract a text representation of the plan from the structured data"""
@@ -46,19 +48,58 @@ class PlanParserService:
     async def parse_plan_from_image(self, image_data: str, user_id: int, db: Session) -> Dict[str, Any]:
         """Parse a training plan from an image using OpenAI Vision."""
         try:
-            # Analyze the image using OpenAI Vision
+            # Convert base64 to bytes for storage
+            image_bytes = base64.b64decode(image_data)
+            
+            # Check if we already have this image parsed
+            image_hash = self.storage_service._generate_image_hash(image_bytes)
+            existing_plan = self.storage_service.get_plan_by_image_hash(user_id, image_hash, db)
+            
+            if existing_plan:
+                print(f"DEBUG: Found existing parsed plan for image hash: {image_hash}")
+                # Load existing parsed data
+                plan_data = self.storage_service.load_parsed_data(existing_plan)
+                # Create training workouts from stored plan
+                self.storage_service.create_training_workouts_from_plan(existing_plan, user_id, db)
+                
+                return {
+                    "id": existing_plan.id,
+                    "title": existing_plan.plan_title,
+                    "parsed_at": existing_plan.parsed_at.isoformat(),
+                    "duration_weeks": len(plan_data.get("weekly_structure", [])),
+                    "weekly_structure": plan_data.get("weekly_structure", []),
+                    "confidence_score": existing_plan.confidence_score,
+                    "cached": True
+                }
+            
+            # Parse new image
+            print(f"DEBUG: Parsing new image with hash: {image_hash}")
             analysis = await self._analyze_plan_image(image_data)
             
-            # Save the parsed plan
-            saved_plan = await self.save_parsed_plan(analysis, user_id, db)
+            # Store the parsed plan
+            stored_plan = self.storage_service.store_parsed_plan(
+                user_id=user_id,
+                plan_data=analysis,
+                image_data=image_bytes,
+                confidence_score=0.9
+            )
+            
+            # Save to database
+            db.add(stored_plan)
+            db.commit()
+            db.refresh(stored_plan)
+            
+            # Create training workouts
+            self.storage_service.create_training_workouts_from_plan(stored_plan, user_id, db)
             
             return {
-                "id": saved_plan.id,
-                "title": saved_plan.title,
-                "start_date": saved_plan.start_date.isoformat(),
-                "duration_weeks": saved_plan.duration_weeks,
-                "weekly_structure": saved_plan.weekly_structure,
-                "verification": saved_plan.verification
+                "id": stored_plan.id,
+                "title": stored_plan.plan_title,
+                "parsed_at": stored_plan.parsed_at.isoformat(),
+                "duration_weeks": len(analysis.get("weekly_structure", [])),
+                "weekly_structure": analysis.get("weekly_structure", []),
+                "confidence_score": stored_plan.confidence_score,
+                "cached": False
             }
             
         except Exception as e:
@@ -122,7 +163,7 @@ class PlanParserService:
                         ]
                     }
                 ],
-                max_tokens=4000,
+                max_tokens=6000,
                 response_format={ "type": "json_object" }
             )
             
@@ -133,23 +174,30 @@ class PlanParserService:
         except Exception as e:
             raise Exception(f"Error analyzing image: {str(e)}")
 
-    async def save_parsed_plan(self, plan_data: dict, user_id: int, db: Session) -> TrainingPlan:
+    async def save_parsed_plan(self, plan_data: dict, user_id: int, db: Session) -> SQLModelTrainingPlan:
         """Save the parsed training plan to the database."""
         try:
+            print(f"DEBUG: Starting to save plan for user {user_id}")
+            print(f"DEBUG: Plan data: {plan_data}")
+            
             # Create the training plan
-            training_plan = TrainingPlan(
+            training_plan = SQLModelTrainingPlan(
                 user_id=user_id,
-                title=plan_data.get("title", "Untitled Plan"),
+                name=plan_data.get("title", "Untitled Plan"),
                 start_date=datetime.utcnow().date(),
-                duration_weeks=len(plan_data.get("weekly_structure", [])),
-                weekly_structure=plan_data.get("weekly_structure", []),
-                verification={"status": "verified", "confidence": 0.9}
+                end_date=datetime.utcnow().date() + timedelta(weeks=len(plan_data.get("weekly_structure", []))),
+                goal_type="General Training",
+                base_mileage=0.0,  # Will calculate from workouts
+                peak_mileage=0.0,  # Will calculate from workouts
+                long_run_day="Sunday",
+                workout_days=json.dumps(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"])
             )
             
             # Add to database and commit
             db.add(training_plan)
             db.commit()
             db.refresh(training_plan)
+            print(f"DEBUG: Saved training plan with ID: {training_plan.id}")
             
             # Create individual training entries
             start_date = datetime.utcnow().date()
@@ -166,13 +214,17 @@ class PlanParserService:
                 "Rest": WorkoutType.REST
             }
             
+            print(f"DEBUG: Processing {len(plan_data.get('weekly_structure', []))} weeks")
+            
             for week_data in plan_data.get("weekly_structure", []):
                 week_number = week_data.get("week_number", 1)
                 week_start = start_date + timedelta(weeks=week_number - 1)
+                print(f"DEBUG: Processing week {week_number} with {len(week_data.get('workouts', []))} workouts")
                 
                 for workout in week_data.get("workouts", []):
                     # Skip rest days
                     if workout.get("workout_type", "").lower() == "rest":
+                        print(f"DEBUG: Skipping rest day")
                         continue
                     
                     # Calculate workout date
@@ -185,6 +237,8 @@ class PlanParserService:
                         workout.get("workout_type", "Easy Run"),
                         WorkoutType.EASY_RUN
                     )
+                    
+                    print(f"DEBUG: Creating training for {workout_date}: {workout.get('workout_type')} - {workout.get('description')}")
                     
                     # Create training entry
                     training = Training(
@@ -201,16 +255,21 @@ class PlanParserService:
                     db.add(training)
                     created_trainings.append(training)
             
+            print(f"DEBUG: Created {len(created_trainings)} training entries")
+            
             # Commit all training entries
             db.commit()
+            print(f"DEBUG: Committed all training entries")
             
             # Refresh all trainings to get their IDs
             for training in created_trainings:
                 db.refresh(training)
             
+            print(f"DEBUG: Successfully saved plan with {len(created_trainings)} workouts")
             return training_plan
             
         except Exception as e:
+            print(f"DEBUG: Error saving plan: {str(e)}")
             db.rollback()
             raise Exception(f"Error saving plan: {str(e)}")
     
